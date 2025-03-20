@@ -192,3 +192,8 @@ if __name__ == '__main__':
         app.run(host=host, port=port, debug=debug)
     else:
         print("Failed to initialize Earth Engine. Exiting.")
+
+
+@app.route("", methods=['GET'])
+def index():
+    return "Hello, World!"
