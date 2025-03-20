@@ -1,0 +1,207 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+<additional_info>
+
+</additional_info>
+
+</file_summary>
+
+<directory_structure>
+app.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="app.py">
+from flask import Flask, request, send_file, jsonify
+import ee
+import matplotlib.pyplot as plt
+import numpy as np
+import urllib.request
+from PIL import Image
+from io import BytesIO
+import os
+import math
+import tempfile
+from flask import Flask, request, send_file, jsonify
+from flask_cors import CORS  # Add this import
+import ee
+
+
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})  # Add this line to enable CORS
+
+def initialize_earth_engine():
+    """Initialize Earth Engine with service account credentials."""
+    try:
+        service_account = "ee-662@ee-gukgurgel.iam.gserviceaccount.com"
+        credentials = ee.ServiceAccountCredentials(service_account, 'ee.json')
+        ee.Initialize(credentials)
+        return True
+    except Exception as e:
+        print(f"Error initializing Earth Engine: {e}")
+        return False
+
+def hectares_to_buffer_km(hectares, safety_margin=1.1):
+    """
+    Convert hectares to a buffer distance in kilometers.
+    
+    Args:
+        hectares (float): Area in hectares
+        safety_margin (float): Safety margin multiplier (default: 1.1 for 10% extra)
+        
+    Returns:
+        float: Buffer distance in kilometers
+    """
+    # 1 hectare = 0.01 square kilometers
+    # Area = π * r²
+    # Solve for r: r = sqrt(Area / π)
+    area_sq_km = hectares * 0.01
+    radius_km = math.sqrt(area_sq_km / math.pi)
+    
+    # Apply safety margin
+    return radius_km * safety_margin
+
+def get_satellite_image(latitude, longitude, buffer_km=1.8, start_date='2023-01-01', end_date='2025-03-20'):
+    """
+    Retrieve a satellite image centered on the given coordinates.
+    
+    Args:
+        latitude (float): Center latitude in decimal degrees
+        longitude (float): Center longitude in decimal degrees
+        buffer_km (float): Buffer distance in kilometers
+        start_date (str): Start date for image collection (YYYY-MM-DD)
+        end_date (str): End date for image collection (YYYY-MM-DD)
+        
+    Returns:
+        PIL.Image: The satellite image
+    """
+    # Create a point and buffer it
+    point = ee.Geometry.Point([longitude, latitude])
+    area_of_interest = point.buffer(buffer_km * 1000)  # Buffer in meters
+    
+    # Get Sentinel-2 imagery
+    sentinel_collection = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                          .filterBounds(area_of_interest)
+                          .filterDate(start_date, end_date)
+                          .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)))
+    
+    # Sort and get the least cloudy image
+    image = sentinel_collection.sort('CLOUDY_PIXEL_PERCENTAGE').first()
+    
+    # If no images found, try Landsat as a backup
+    if image is None:
+        print("No Sentinel-2 images found. Trying Landsat...")
+        landsat_collection = (ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+                             .filterBounds(area_of_interest)
+                             .filterDate(start_date, end_date))
+        image = landsat_collection.sort('CLOUD_COVER').first()
+        
+        if image is None:
+            raise Exception("No suitable satellite images found for the specified criteria.")
+    
+    # For Sentinel-2, use RGB visualization
+    visualization_params = {
+        'bands': ['B4', 'B3', 'B2'],  # RGB bands for natural color
+        'min': 0,
+        'max': 3000,
+        'gamma': 1.4
+    }
+    
+    # Get the map URL
+    map_id = image.visualize(**visualization_params).getThumbURL({
+        'region': area_of_interest,
+        'dimensions': '1024',
+        'format': 'png'
+    })
+    
+    # Download and return the image
+    response = urllib.request.urlopen(map_id)
+    img_data = response.read()
+    img = Image.open(BytesIO(img_data))
+    
+    return img
+
+@app.route('/satellite', methods=['GET'])
+def satellite_endpoint():
+    try:
+        # Get parameters from the request
+        latitude = float(request.args.get('latitude', None))
+        longitude = float(request.args.get('longitude', None))
+        hectares = float(request.args.get('hectares', 100))  # Default to 100 hectares if not specified
+        start_date = request.args.get('start_date', '2023-01-01')
+        end_date = request.args.get('end_date', '2025-03-20')
+        
+        # Validate parameters
+        if latitude is None or longitude is None:
+            return jsonify({"error": "Latitude and longitude are required parameters"}), 400
+        
+        # Convert hectares to buffer distance with 10% safety margin
+        buffer_km = hectares_to_buffer_km(hectares, safety_margin=1.1)
+        
+        # Get the satellite image
+        img = get_satellite_image(latitude, longitude, buffer_km, start_date, end_date)
+        
+        # Create a temporary file to save the image
+        temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+        img.save(temp_file.name)
+        temp_file.close()
+        
+        # Return the image file
+        return send_file(temp_file.name, mimetype='image/png', as_attachment=True, 
+                        download_name=f"satellite_{latitude}_{longitude}_{hectares}ha.png")
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "ok"}), 200
+
+if __name__ == '__main__':
+    # Initialize Earth Engine
+    if initialize_earth_engine():
+        # Run the Flask app
+        app.run(host='0.0.0.0', port=5032, debug=True)
+    else:
+        print("Failed to initialize Earth Engine. Exiting.")
+</file>
+
+</files>
