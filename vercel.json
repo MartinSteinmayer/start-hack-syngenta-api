@@ -20,6 +20,6 @@
     }
   ],
   "env": {
-    "PYTHONUNBUFFERED": "1",
+    "PYTHONUNBUFFERED": "1"
   }
 }
