@@ -1,32 +1,40 @@
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, Response, jsonify
 import ee
 import urllib.request
-from PIL import Image
-from io import BytesIO
 import os
 import math
-import tempfile
 import json
+import logging
 from flask_cors import CORS
 from dotenv import load_dotenv
-# Load environment variables from .env file
+
+# Load environment variables
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
+# Global flag to track initialization
+ee_initialized = False
+
 
 def initialize_earth_engine():
     """Initialize Earth Engine with service account credentials from environment variables."""
+    global ee_initialized
+
+    # Skip initialization if already done
+    if ee_initialized:
+        logger.info("Earth Engine already initialized")
+        return True
+
     try:
-        # Get credentials from environment variables
-        service_account = os.getenv("EE_SERVICE_ACCOUNT")
-
-        # Two approaches depending on your preference:
-
-        # APPROACH 1: Create temporary JSON credentials file
-        credentials_dict = {
-            "type": "service_account",
+        # Create a service account credentials dictionary from environment variables
+        service_account_info = {
+            "type": os.getenv("EE_TYPE"),
             "project_id": os.getenv("EE_PROJECT_ID"),
             "private_key_id": os.getenv("EE_PRIVATE_KEY_ID"),
             "private_key": os.getenv("EE_PRIVATE_KEY"),
@@ -39,22 +47,16 @@ def initialize_earth_engine():
             "universe_domain": os.getenv("EE_UNIVERSE_DOMAIN")
         }
 
-        # Create a temporary file for credentials
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_creds_file:
-            json.dump(credentials_dict, temp_creds_file)
-            temp_creds_path = temp_creds_file.name
-
-        # Initialize Earth Engine with the temporary credentials file
-        credentials = ee.ServiceAccountCredentials(service_account, temp_creds_path)
+        # Initialize with service account credentials
+        credentials = ee.ServiceAccountCredentials(service_account_info["client_email"],
+                                                   key_data=json.dumps(service_account_info))
         ee.Initialize(credentials)
 
-        # Clean up the temporary file
-        os.unlink(temp_creds_path)
-
-        print("Earth Engine successfully initialized")
+        ee_initialized = True
+        logger.info("Earth Engine initialized successfully")
         return True
     except Exception as e:
-        print(f"Error initializing Earth Engine: {e}")
+        logger.error(f"Error initializing Earth Engine: {e}")
         return False
 
 
@@ -69,13 +71,8 @@ def hectares_to_buffer_km(hectares, safety_margin=1.1):
     Returns:
         float: Buffer distance in kilometers
     """
-    # 1 hectare = 0.01 square kilometers
-    # Area = π * r²
-    # Solve for r: r = sqrt(Area / π)
     area_sq_km = hectares * 0.01
     radius_km = math.sqrt(area_sq_km / math.pi)
-
-    # Apply safety margin
     return radius_km * safety_margin
 
 
@@ -91,8 +88,10 @@ def get_satellite_image(latitude, longitude, buffer_km=1.8, start_date='2023-01-
         end_date (str): End date for image collection (YYYY-MM-DD)
         
     Returns:
-        PIL.Image: The satellite image
+        bytes: The satellite image as binary data
     """
+    logger.info(f"Retrieving satellite image for coordinates: {latitude}, {longitude} with buffer: {buffer_km}km")
+
     # Create a point and buffer it
     point = ee.Geometry.Point([longitude, latitude])
     area_of_interest = point.buffer(buffer_km * 1000)  # Buffer in meters
@@ -106,12 +105,13 @@ def get_satellite_image(latitude, longitude, buffer_km=1.8, start_date='2023-01-
 
     # If no images found, try Landsat as a backup
     if image is None:
-        print("No Sentinel-2 images found. Trying Landsat...")
+        logger.info("No Sentinel-2 images found. Trying Landsat...")
         landsat_collection = (ee.ImageCollection('LANDSAT/LC08/C02/T1_L2').filterBounds(area_of_interest).filterDate(
             start_date, end_date))
         image = landsat_collection.sort('CLOUD_COVER').first()
 
         if image is None:
+            logger.error("No suitable satellite images found for the specified criteria.")
             raise Exception("No suitable satellite images found for the specified criteria.")
 
     # For Sentinel-2, use RGB visualization
@@ -129,81 +129,94 @@ def get_satellite_image(latitude, longitude, buffer_km=1.8, start_date='2023-01-
         'format': 'png'
     })
 
+    logger.info(f"Generated image URL (truncated): {map_id[:50]}...")
+
     # Download and return the image
     response = urllib.request.urlopen(map_id)
     img_data = response.read()
-    img = Image.open(BytesIO(img_data))
 
-    return img
+    return img_data
 
 
 @app.route('/satellite', methods=['GET'])
 def satellite_endpoint():
     try:
+        # Initialize Earth Engine (if not already done)
+        if not initialize_earth_engine():
+            return jsonify({"error": "Failed to initialize Earth Engine"}), 500
+
         # Get parameters from the request
-        latitude = float(request.args.get('latitude', None))
-        longitude = float(request.args.get('longitude', None))
-        hectares = float(request.args.get('hectares', 100))  # Default to 100 hectares if not specified
+        latitude = request.args.get('latitude')
+        longitude = request.args.get('longitude')
+        hectares = request.args.get('hectares', '100')  # Default to 100 hectares if not specified
         start_date = request.args.get('start_date', '2023-01-01')
         end_date = request.args.get('end_date', '2025-03-20')
 
         # Validate parameters
-        if latitude is None or longitude is None:
+        if not latitude or not longitude:
+            logger.error("Missing required parameters: latitude and longitude")
             return jsonify({"error": "Latitude and longitude are required parameters"}), 400
+
+        try:
+            latitude = float(latitude)
+            longitude = float(longitude)
+            hectares = float(hectares)
+        except ValueError:
+            logger.error("Invalid parameter types")
+            return jsonify({"error": "Latitude, longitude, and hectares must be numeric values"}), 400
+
+        logger.info(f"Processing request for satellite image: lat={latitude}, lon={longitude}, hectares={hectares}")
 
         # Convert hectares to buffer distance with 10% safety margin
         buffer_km = hectares_to_buffer_km(hectares, safety_margin=1.1)
 
-        # Get the satellite image
-        img = get_satellite_image(latitude, longitude, buffer_km, start_date, end_date)
+        # Get the satellite image as binary data
+        img_data = get_satellite_image(latitude, longitude, buffer_km, start_date, end_date)
 
-        # Create a temporary file to save the image
-        temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-        img.save(temp_file.name)
-        temp_file.close()
+        logger.info(f"Successfully generated satellite image ({len(img_data)} bytes)")
 
-        # Return the image file
-        response = send_file(temp_file.name,
-                             mimetype='image/png',
-                             as_attachment=True,
-                             download_name=f"satellite_{latitude}_{longitude}_{hectares}ha.png")
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Expose-Headers', 'Content-Disposition')
-        return response
+        # Return the image directly from memory
+        return Response(
+            img_data,
+            mimetype='image/png',
+            headers={'Content-Disposition': f'attachment; filename=satellite_{latitude}_{longitude}_{hectares}ha.png'})
 
     except Exception as e:
-        error_response = jsonify({"error": str(e)})
-        error_response.headers.add('Access-Control-Allow-Origin', '*')
-        return error_response, 500
+        logger.error(f"Error processing satellite request: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({"status": "ok"}), 200
-
-
-if __name__ == '__main__':
-    # Initialize Earth Engine
-    if initialize_earth_engine():
-        # Run the Flask app
-        host = os.getenv("FLASK_HOST", "0.0.0.0")
-        port = int(os.getenv("FLASK_PORT", 5032))
-        debug = os.getenv("FLASK_DEBUG", "1") == "1"
-
-        # Run the Flask app
-        app.run(host=host, port=port, debug=debug)
-    else:
-        print("Failed to initialize Earth Engine. Exiting.")
-
-
-@app.route("/", methods=['GET'])
-def index():
+    logger.info("Health check requested")
     return jsonify({
         "status": "ok",
-        "api": "Satellite Image API",
-        "version": "1.0",
-        "endpoints": {
-            "/satellite": "Retrieve satellite imagery",
-            "/health": "API health check"
-        }
+        "earth_engine_initialized": ee_initialized,
+        "environment": os.getenv("FLASK_ENV", "production")
     }), 200
+
+
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({
+        "service": "Satellite Image API",
+        "endpoints": {
+            "/satellite": "Get satellite imagery (params: latitude, longitude, hectares, start_date, end_date)",
+            "/health": "Health check"
+        },
+        "version": "1.0.0"
+    }), 200
+
+
+# For local development
+if __name__ == '__main__':
+    # Initialize Earth Engine
+    initialize_earth_engine()
+
+    # Run the Flask app with parameters from environment variables
+    host = os.getenv("FLASK_HOST", "0.0.0.0")
+    port = int(os.getenv("FLASK_PORT", 5032))
+    debug = os.getenv("FLASK_DEBUG", "0") == "1"
+
+    logger.info(f"Starting Flask app on {host}:{port}, debug={debug}")
+    app.run(host=host, port=port, debug=debug)
