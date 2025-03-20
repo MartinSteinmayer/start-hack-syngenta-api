@@ -1,7 +1,5 @@
 from flask import Flask, request, send_file, jsonify
 import ee
-import matplotlib.pyplot as plt
-import numpy as np
 import urllib.request
 from PIL import Image
 from io import BytesIO
@@ -11,7 +9,6 @@ import tempfile
 import json
 from flask_cors import CORS
 from dotenv import load_dotenv
-
 # Load environment variables from .env file
 load_dotenv()
 
@@ -166,13 +163,18 @@ def satellite_endpoint():
         temp_file.close()
 
         # Return the image file
-        return send_file(temp_file.name,
-                         mimetype='image/png',
-                         as_attachment=True,
-                         download_name=f"satellite_{latitude}_{longitude}_{hectares}ha.png")
+        response = send_file(temp_file.name,
+                             mimetype='image/png',
+                             as_attachment=True,
+                             download_name=f"satellite_{latitude}_{longitude}_{hectares}ha.png")
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Expose-Headers', 'Content-Disposition')
+        return response
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        error_response = jsonify({"error": str(e)})
+        error_response.headers.add('Access-Control-Allow-Origin', '*')
+        return error_response, 500
 
 
 @app.route('/health', methods=['GET'])
@@ -194,6 +196,14 @@ if __name__ == '__main__':
         print("Failed to initialize Earth Engine. Exiting.")
 
 
-@app.route("", methods=['GET'])
+@app.route("/", methods=['GET'])
 def index():
-    return "Hello, World!"
+    return jsonify({
+        "status": "ok",
+        "api": "Satellite Image API",
+        "version": "1.0",
+        "endpoints": {
+            "/satellite": "Retrieve satellite imagery",
+            "/health": "API health check"
+        }
+    }), 200

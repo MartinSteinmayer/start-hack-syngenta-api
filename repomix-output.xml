@@ -43,41 +43,193 @@ The content is organized as follows:
 </file_summary>
 
 <directory_structure>
+.gitignore
 app.py
+requirements.txt
+vercel.json
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
 
+<file path=".gitignore">
+# Environment variables
+.env
+repomix-output.xml
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# Local development settings
+.vscode/
+.idea/
+
+# Temporary files
+*.swp
+*.swo
+*.tmp
+*.temp
+.DS_Store
+</file>
+
+<file path="requirements.txt">
+blessings==1.7
+blinker==1.9.0
+cachetools==5.5.2
+certifi==2025.1.31
+charset-normalizer==3.4.1
+click==8.1.8
+contourpy==1.3.1
+cycler==0.12.1
+earthengine-api==1.5.7
+Flask==3.1.0
+flask-cors==5.0.1
+fonttools==4.56.0
+google-api-core==2.24.2
+google-api-python-client==2.165.0
+google-auth==2.38.0
+google-auth-httplib2==0.2.0
+google-cloud-core==2.4.3
+google-cloud-storage==3.1.0
+google-crc32c==1.7.0
+google-resumable-media==2.7.2
+googleapis-common-protos==1.69.2
+httplib2==0.22.0
+idna==3.10
+itsdangerous==2.2.0
+Jinja2==3.1.6
+kiwisolver==1.4.8
+MarkupSafe==3.0.2
+numpy==2.2.4
+packaging==24.2
+pillow==11.1.0
+proto-plus==1.26.1
+protobuf==6.30.1
+pyasn1==0.6.1
+pyasn1_modules==0.4.1
+pyparsing==3.2.1
+python-dateutil==2.9.0.post0
+python-dotenv==1.0.1
+requests==2.32.3
+rsa==4.9
+six==1.17.0
+uritemplate==4.1.1
+urllib3==2.3.0
+Werkzeug==3.1.3
+</file>
+
+<file path="vercel.json">
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "app.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "app.py",
+      "methods": ["GET", "POST", "OPTIONS"],
+      "headers": {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Max-Age": "86400"
+      }
+    }
+  ],
+  "env": {
+    "PYTHONUNBUFFERED": "1",
+  }
+}
+</file>
+
 <file path="app.py">
 from flask import Flask, request, send_file, jsonify
 import ee
-import matplotlib.pyplot as plt
-import numpy as np
 import urllib.request
 from PIL import Image
 from io import BytesIO
 import os
 import math
 import tempfile
-from flask import Flask, request, send_file, jsonify
-from flask_cors import CORS  # Add this import
-import ee
-
+import json
+from flask_cors import CORS
+from dotenv import load_dotenv
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})  # Add this line to enable CORS
+CORS(app, resources={r"/*": {"origins": "*"}})
+
 
 def initialize_earth_engine():
-    """Initialize Earth Engine with service account credentials."""
+    """Initialize Earth Engine with service account credentials from environment variables."""
     try:
-        service_account = "ee-662@ee-gukgurgel.iam.gserviceaccount.com"
-        credentials = ee.ServiceAccountCredentials(service_account, 'ee.json')
+        # Get credentials from environment variables
+        service_account = os.getenv("EE_SERVICE_ACCOUNT")
+
+        # Two approaches depending on your preference:
+
+        # APPROACH 1: Create temporary JSON credentials file
+        credentials_dict = {
+            "type": "service_account",
+            "project_id": os.getenv("EE_PROJECT_ID"),
+            "private_key_id": os.getenv("EE_PRIVATE_KEY_ID"),
+            "private_key": os.getenv("EE_PRIVATE_KEY"),
+            "client_email": os.getenv("EE_CLIENT_EMAIL"),
+            "client_id": os.getenv("EE_CLIENT_ID"),
+            "auth_uri": os.getenv("EE_AUTH_URI"),
+            "token_uri": os.getenv("EE_TOKEN_URI"),
+            "auth_provider_x509_cert_url": os.getenv("EE_AUTH_PROVIDER_X509_CERT_URL"),
+            "client_x509_cert_url": os.getenv("EE_CLIENT_X509_CERT_URL"),
+            "universe_domain": os.getenv("EE_UNIVERSE_DOMAIN")
+        }
+
+        # Create a temporary file for credentials
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_creds_file:
+            json.dump(credentials_dict, temp_creds_file)
+            temp_creds_path = temp_creds_file.name
+
+        # Initialize Earth Engine with the temporary credentials file
+        credentials = ee.ServiceAccountCredentials(service_account, temp_creds_path)
         ee.Initialize(credentials)
+
+        # Clean up the temporary file
+        os.unlink(temp_creds_path)
+
+        print("Earth Engine successfully initialized")
         return True
     except Exception as e:
         print(f"Error initializing Earth Engine: {e}")
         return False
+
 
 def hectares_to_buffer_km(hectares, safety_margin=1.1):
     """
@@ -95,9 +247,10 @@ def hectares_to_buffer_km(hectares, safety_margin=1.1):
     # Solve for r: r = sqrt(Area / π)
     area_sq_km = hectares * 0.01
     radius_km = math.sqrt(area_sq_km / math.pi)
-    
+
     # Apply safety margin
     return radius_km * safety_margin
+
 
 def get_satellite_image(latitude, longitude, buffer_km=1.8, start_date='2023-01-01', end_date='2025-03-20'):
     """
@@ -116,27 +269,24 @@ def get_satellite_image(latitude, longitude, buffer_km=1.8, start_date='2023-01-
     # Create a point and buffer it
     point = ee.Geometry.Point([longitude, latitude])
     area_of_interest = point.buffer(buffer_km * 1000)  # Buffer in meters
-    
+
     # Get Sentinel-2 imagery
-    sentinel_collection = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-                          .filterBounds(area_of_interest)
-                          .filterDate(start_date, end_date)
-                          .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)))
-    
+    sentinel_collection = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').filterBounds(area_of_interest).filterDate(
+        start_date, end_date).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)))
+
     # Sort and get the least cloudy image
     image = sentinel_collection.sort('CLOUDY_PIXEL_PERCENTAGE').first()
-    
+
     # If no images found, try Landsat as a backup
     if image is None:
         print("No Sentinel-2 images found. Trying Landsat...")
-        landsat_collection = (ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
-                             .filterBounds(area_of_interest)
-                             .filterDate(start_date, end_date))
+        landsat_collection = (ee.ImageCollection('LANDSAT/LC08/C02/T1_L2').filterBounds(area_of_interest).filterDate(
+            start_date, end_date))
         image = landsat_collection.sort('CLOUD_COVER').first()
-        
+
         if image is None:
             raise Exception("No suitable satellite images found for the specified criteria.")
-    
+
     # For Sentinel-2, use RGB visualization
     visualization_params = {
         'bands': ['B4', 'B3', 'B2'],  # RGB bands for natural color
@@ -144,20 +294,21 @@ def get_satellite_image(latitude, longitude, buffer_km=1.8, start_date='2023-01-
         'max': 3000,
         'gamma': 1.4
     }
-    
+
     # Get the map URL
     map_id = image.visualize(**visualization_params).getThumbURL({
         'region': area_of_interest,
         'dimensions': '1024',
         'format': 'png'
     })
-    
+
     # Download and return the image
     response = urllib.request.urlopen(map_id)
     img_data = response.read()
     img = Image.open(BytesIO(img_data))
-    
+
     return img
+
 
 @app.route('/satellite', methods=['GET'])
 def satellite_endpoint():
@@ -168,40 +319,54 @@ def satellite_endpoint():
         hectares = float(request.args.get('hectares', 100))  # Default to 100 hectares if not specified
         start_date = request.args.get('start_date', '2023-01-01')
         end_date = request.args.get('end_date', '2025-03-20')
-        
+
         # Validate parameters
         if latitude is None or longitude is None:
             return jsonify({"error": "Latitude and longitude are required parameters"}), 400
-        
+
         # Convert hectares to buffer distance with 10% safety margin
         buffer_km = hectares_to_buffer_km(hectares, safety_margin=1.1)
-        
+
         # Get the satellite image
         img = get_satellite_image(latitude, longitude, buffer_km, start_date, end_date)
-        
+
         # Create a temporary file to save the image
         temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
         img.save(temp_file.name)
         temp_file.close()
-        
+
         # Return the image file
-        return send_file(temp_file.name, mimetype='image/png', as_attachment=True, 
-                        download_name=f"satellite_{latitude}_{longitude}_{hectares}ha.png")
-    
+        return send_file(temp_file.name,
+                         mimetype='image/png',
+                         as_attachment=True,
+                         download_name=f"satellite_{latitude}_{longitude}_{hectares}ha.png")
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "ok"}), 200
 
+
 if __name__ == '__main__':
     # Initialize Earth Engine
     if initialize_earth_engine():
         # Run the Flask app
-        app.run(host='0.0.0.0', port=5032, debug=True)
+        host = os.getenv("FLASK_HOST", "0.0.0.0")
+        port = int(os.getenv("FLASK_PORT", 5032))
+        debug = os.getenv("FLASK_DEBUG", "1") == "1"
+
+        # Run the Flask app
+        app.run(host=host, port=port, debug=debug)
     else:
         print("Failed to initialize Earth Engine. Exiting.")
+
+
+@app.route("", methods=['GET'])
+def index():
+    return "Hello, World!"
 </file>
 
 </files>
